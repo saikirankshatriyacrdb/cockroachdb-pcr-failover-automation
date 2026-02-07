@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  haproxy:
+    image: haproxy:latest
+    container_name: cockroach-haproxy
+    ports:
+      - "26257:26257"  # PostgreSQL/CockroachDB port
+      - "8404:8404"    # HAProxy stats interface
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - haproxy-socket:/var/run/haproxy
+    restart: unless-stopped
+    networks:
+      - cockroach-network
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  haproxy-socket:
+
+networks:
+  cockroach-network:
+    driver: bridge

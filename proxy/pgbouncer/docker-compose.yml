@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: cockroach-pgbouncer
+    ports:
+      - "6432:6432"  # PgBouncer port (applications connect here)
+    volumes:
+      - ./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - pgbouncer-data:/var/log/pgbouncer
+    environment:
+      # Set these to your actual cluster DNS and credentials
+      - DATABASE_URL=postgresql://<YOUR_USERNAME>@<YOUR_PRIMARY_SQL_DNS>:26257/defaultdb?sslmode=require
+    restart: unless-stopped
+    networks:
+      - cockroach-network
+    healthcheck:
+      test: ["CMD", "psql", "-h", "127.0.0.1", "-p", "6432", "-U", "admin", "-d", "pgbouncer", "-c", "SHOW VERSION"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pgbouncer-data:
+
+networks:
+  cockroach-network:
+    driver: bridge

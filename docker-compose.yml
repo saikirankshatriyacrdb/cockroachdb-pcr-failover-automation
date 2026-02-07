@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  failover-automation:
+    build: .
+    container_name: cockroach-failover-automation
+    command: python cli.py monitor
+    environment:
+      - COCKROACH_API_SECRET_KEY=${COCKROACH_API_SECRET_KEY}
+      - PRIMARY_CLUSTER_ID=${PRIMARY_CLUSTER_ID}
+      - STANDBY_CLUSTER_ID=${STANDBY_CLUSTER_ID}
+      - PCR_STREAM_ID=${PCR_STREAM_ID:-}
+      - HEALTH_CHECK_INTERVAL=${HEALTH_CHECK_INTERVAL:-30}
+      - FAILURE_THRESHOLD=${FAILURE_THRESHOLD:-3}
+      - FAILOVER_DELAY=${FAILOVER_DELAY:-60}
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  failover-service:
+    build: .
+    container_name: cockroach-failover-service
+    command: python cli.py service --port 8080
+    ports:
+      - "8080:8080"
+    environment:
+      - COCKROACH_API_SECRET_KEY=${COCKROACH_API_SECRET_KEY}
+      - PRIMARY_CLUSTER_ID=${PRIMARY_CLUSTER_ID}
+      - STANDBY_CLUSTER_ID=${STANDBY_CLUSTER_ID}
+      - PCR_STREAM_ID=${PCR_STREAM_ID:-}
+    restart: unless-stopped
+    profiles:
+      - service  # Only start with: docker compose --profile service up
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
