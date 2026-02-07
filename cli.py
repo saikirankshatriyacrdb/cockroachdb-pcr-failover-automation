@@ -35,6 +35,14 @@ def cmd_monitor(args):
     from src.cluster_monitor import ClusterMonitor
     from src.config import Config
 
+    # Apply CLI overrides
+    if args.interval is not None:
+        Config.HEALTH_CHECK_INTERVAL = args.interval
+    if args.threshold is not None:
+        Config.FAILURE_THRESHOLD = args.threshold
+    if args.delay is not None:
+        Config.FAILOVER_DELAY = args.delay
+
     monitor = ClusterMonitor()
     running = True
 
@@ -49,6 +57,7 @@ def cmd_monitor(args):
     logger.info("Starting automated failover service...")
     logger.info(f"Health check interval: {Config.HEALTH_CHECK_INTERVAL} seconds")
     logger.info(f"Failure threshold: {Config.FAILURE_THRESHOLD} consecutive failures")
+    logger.info(f"Failover delay: {Config.FAILOVER_DELAY} seconds")
     logger.info(f"Primary cluster ID: {Config.PRIMARY_CLUSTER_ID}")
     logger.info(f"Standby cluster ID: {Config.STANDBY_CLUSTER_ID}")
 
@@ -855,6 +864,12 @@ Examples:
 
     # monitor
     p_monitor = subparsers.add_parser('monitor', help='Continuous health monitoring with auto-failover')
+    p_monitor.add_argument('--interval', type=int, default=None,
+                          help='Health check interval in seconds (default: from .env or 30)')
+    p_monitor.add_argument('--threshold', type=int, default=None,
+                          help='Consecutive failures before failover (default: from .env or 3)')
+    p_monitor.add_argument('--delay', type=int, default=None,
+                          help='Seconds to wait after threshold before failover (default: from .env or 60)')
 
     # failover
     p_failover = subparsers.add_parser('failover', help='Manual failover trigger')
