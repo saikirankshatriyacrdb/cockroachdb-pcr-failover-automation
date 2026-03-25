@@ -61,11 +61,26 @@ def cmd_monitor(args):
     logger.info(f"Primary cluster ID: {Config.PRIMARY_CLUSTER_ID}")
     logger.info(f"Standby cluster ID: {Config.STANDBY_CLUSTER_ID}")
 
+    logger.info(f"Cutover timeout alert: {Config.CUTOVER_TIMEOUT_MINUTES} minutes")
+    if Config.ALERT_WEBHOOK_URL:
+        logger.info(f"Alert webhook: configured")
+
     while running:
         try:
             failover_initiated = monitor.detect_and_handle_failure()
             if failover_initiated:
                 logger.critical("Failover has been initiated. Service will continue monitoring.")
+
+            # Check for hung cutover (stream stuck in FAILING_OVER)
+            # Alert only -- no automatic destructive action, since the primary
+            # may be down and destroying the standby would leave no working cluster.
+            alert = monitor.check_cutover_timeout()
+            if alert:
+                logger.critical(
+                    f"ALERT: PCR cutover hung for {alert['elapsed_minutes']:.1f} minutes. "
+                    f"Use 'python cli.py escape-hatch' to recover."
+                )
+
             time.sleep(Config.HEALTH_CHECK_INTERVAL)
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
@@ -272,12 +287,19 @@ def cmd_status(args):
     print("\nPCR Stream:")
     stream_info = monitor.get_pcr_stream_info()
     if stream_info:
+        stream_status = stream_info.get('status', 'N/A')
         print(f"  Stream ID: {stream_info.get('id', 'N/A')}")
-        print(f"  Status: {stream_info.get('status', 'N/A')}")
+        print(f"  Status: {stream_status}")
         print(f"  Primary: {stream_info.get('primary_cluster_id', 'N/A')}")
         print(f"  Standby: {stream_info.get('standby_cluster_id', 'N/A')}")
         print(f"  Replicated Time: {stream_info.get('replicated_time', 'N/A')}")
         print(f"  Replication Lag: {stream_info.get('replication_lag_seconds', 'N/A')} seconds")
+
+        if stream_status.upper() == "FAILING_OVER":
+            print(f"\n  *** WARNING: Stream is stuck in FAILING_OVER state ***")
+            print(f"  Cutover alert threshold: {Config.CUTOVER_TIMEOUT_MINUTES} minutes")
+            print(f"  Use 'python cli.py escape-hatch status' for details")
+            print(f"  Use 'python cli.py escape-hatch cancel-cutover' to attempt recovery")
     else:
         print("  No PCR stream found or stream ID not discovered")
 
@@ -837,6 +859,98 @@ def cmd_debug(args):
 
 
 # ---------------------------------------------------------------------------
+# escape-hatch
+# ---------------------------------------------------------------------------
+def cmd_escape_hatch(args):
+    """Escape hatch for stuck FAILING_OVER state"""
+    from src.cluster_monitor import ClusterMonitor
+    from src.config import Config
+
+    monitor = ClusterMonitor()
+
+    print("=" * 60)
+    print("PCR Escape Hatch")
+    print("=" * 60)
+    print(f"\nPrimary Cluster:  {Config.PRIMARY_CLUSTER_ID}")
+    print(f"Standby Cluster:  {Config.STANDBY_CLUSTER_ID}")
+
+    # Show current stream status
+    stream_info = monitor.get_pcr_stream_info()
+    if stream_info:
+        status = stream_info.get('status', 'N/A')
+        print(f"PCR Stream:       {monitor.pcr_stream_id}")
+        print(f"Stream Status:    {status}")
+    else:
+        print("PCR Stream:       not found or not discoverable")
+
+    if args.action == 'status':
+        cutover_status = monitor.get_cutover_status()
+        print(f"\nCutover Details:")
+        print(f"  Status:           {cutover_status['status']}")
+        print(f"  Is Stuck:         {'YES' if cutover_status['is_stuck'] else 'No'}")
+        print(f"  Elapsed:          {cutover_status['elapsed_minutes']} minutes")
+        print(f"  Alert Threshold:  {cutover_status['threshold_minutes']} minutes")
+        print(f"  Replicated Time:  {cutover_status.get('replicated_time', 'N/A')}")
+        print(f"  Created At:       {cutover_status.get('created_at', 'N/A')}")
+
+        if cutover_status['status'] == 'FAILING_OVER':
+            print(f"\nThe PCR stream is stuck in FAILING_OVER state.")
+            print(f"Available recovery actions:")
+            print(f"  python cli.py escape-hatch cancel-cutover    # Try to cancel the cutover")
+            print(f"  python cli.py escape-hatch destroy-standby   # Force-destroy standby cluster")
+
+    elif args.action == 'cancel-cutover':
+        print(f"\nThis will attempt to cancel the stuck PCR cutover.")
+        print(f"Actions taken:")
+        print(f"  1. Attempt to DELETE the PCR stream via CC API")
+        print(f"  2. Attempt to force-complete the stream if deletion fails")
+
+        if not args.yes:
+            confirm = input("\nType 'YES' to proceed: ")
+            if confirm != 'YES':
+                print("Cancelled")
+                return
+
+        success = monitor.cancel_pcr_cutover()
+        if success:
+            print("\nCutover cancellation successful.")
+            print("Verify with: python cli.py escape-hatch status")
+        else:
+            print("\nCutover cancellation failed.")
+            print("Try: python cli.py escape-hatch destroy-standby")
+            print("Or contact CockroachDB support for manual intervention.")
+            sys.exit(1)
+
+    elif args.action == 'destroy-standby':
+        print(f"\n*** WARNING: DESTRUCTIVE OPERATION ***")
+        print(f"This will attempt to DESTROY the standby cluster: {Config.STANDBY_CLUSTER_ID}")
+        print(f"\nActions taken:")
+        print(f"  1. Attempt to cancel/delete the PCR stream")
+        print(f"  2. Delete the standby cluster via CC API")
+        print(f"\nThis operation CANNOT be undone. The standby cluster and all")
+        print(f"its data will be permanently deleted.")
+
+        force = getattr(args, 'force', False)
+
+        if not args.yes:
+            confirm = input(f"\nType 'DESTROY {Config.STANDBY_CLUSTER_ID[:8]}' to proceed: ")
+            expected = f"DESTROY {Config.STANDBY_CLUSTER_ID[:8]}"
+            if confirm != expected:
+                print("Cancelled")
+                return
+
+        success = monitor.force_destroy_standby(force=force)
+        if success:
+            print("\nStandby cluster destruction initiated.")
+            print("The cluster will be deleted asynchronously.")
+            print("Check progress with: python cli.py status")
+        else:
+            print("\nStandby cluster destruction failed.")
+            print("Contact CockroachDB support for manual intervention.")
+            sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 def build_parser():
@@ -857,6 +971,9 @@ Examples:
   python cli.py service --port 8080       # Start HTTP sidecar service
   python cli.py settings --setting server.time_until_store_dead --value 15m0s
   python cli.py debug                     # Debug raw API responses
+  python cli.py escape-hatch status       # Check if cutover is stuck
+  python cli.py escape-hatch cancel-cutover  # Try to cancel stuck cutover
+  python cli.py escape-hatch destroy-standby # Force-destroy standby cluster
 """
     )
 
@@ -923,6 +1040,14 @@ Examples:
     # debug
     p_debug = subparsers.add_parser('debug', help='Raw API response debugging')
 
+    # escape-hatch
+    p_escape = subparsers.add_parser('escape-hatch', help='Escape hatch for stuck FAILING_OVER state')
+    p_escape.add_argument('action', choices=['status', 'cancel-cutover', 'destroy-standby'],
+                          help='Escape hatch action')
+    p_escape.add_argument('--yes', '-y', action='store_true', help='Skip confirmation')
+    p_escape.add_argument('--force', action='store_true',
+                          help='Force action even if stream is not in FAILING_OVER state')
+
     return parser
 
 
@@ -945,6 +1070,7 @@ def main():
         'service': cmd_service,
         'settings': cmd_settings,
         'debug': cmd_debug,
+        'escape-hatch': cmd_escape_hatch,
     }
 
     cmd_func = commands.get(args.command)

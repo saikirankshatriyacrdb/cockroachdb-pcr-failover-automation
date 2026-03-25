@@ -26,6 +26,10 @@ class Config:
     FAILOVER_TO_LATEST = os.getenv("FAILOVER_TO_LATEST", "true").lower() == "true"
     FAILOVER_AT_TIMESTAMP = os.getenv("FAILOVER_AT_TIMESTAMP")  # Optional ISO timestamp
 
+    # Cutover Alert Configuration
+    CUTOVER_TIMEOUT_MINUTES = int(os.getenv("CUTOVER_TIMEOUT_MINUTES", "5"))
+    ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL")  # Optional: Slack/PagerDuty webhook
+
     # Monitoring
     ENABLE_PROMETHEUS = os.getenv("ENABLE_PROMETHEUS", "false").lower() == "true"
     PROMETHEUS_PORT = int(os.getenv("PROMETHEUS_PORT", "8000"))
